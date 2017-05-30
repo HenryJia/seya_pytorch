@@ -1,4 +1,4 @@
-# seya-pytorch
+# seya_pytorch
 Bringing some extra cosmo to ~~keras~~ PyTorch!
 
 Based on EderSanta's [Seya](https://github.com/EderSantana/seya)
