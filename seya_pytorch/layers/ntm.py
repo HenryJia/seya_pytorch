@@ -98,9 +98,10 @@ class NTM(Module):
         s = F.softmax(func_s(inp))
 
         # We want to keep the singleton dimensions so we use slices
-        beta = F.relu(c[:, 0:1]) + 1e-4
-        g = F.sigmoid(c[:, 1:2])
-        gamma = F.relu(c[:, 2:3]) + (1 + 1e-4)
+        beta, g, gamma = c.chunk(3, dim = 1)
+        beta = F.relu(beta) + 1e-4
+        g = F.sigmoid(g)
+        gamma = F.relu(gamma) + 1 + 1e-4
 
         return (k, c, s, beta, g, gamma)
 
@@ -110,7 +111,7 @@ class NTM(Module):
         # We can do this using the dot product rule via torch.addbmm
         # Therefore if we bmm (samples, 1, m) and (samples, m, n) this will give us (samples, 1, n)
         # We can then squeeze this to (samples, n)
-        dot = torch.bmm(k[:, None], M.permute(0, 2, 1)).squeeze()
+        dot = torch.bmm(k.unsqueeze(1), M.permute(0, 2, 1)).squeeze()
 
         # Get the norms of the slots and the embedding vectors
         # Note: by default, pytorch keeps singleton dimensions after sum
@@ -124,20 +125,17 @@ class NTM(Module):
         content = F.softmax(beta.expand_as(dot) * dot / (nM * nk))
 
         # Apply the interpolation gate
-        g = g.expand_as(content)
-        inter = content * g + (1 - g) * head_tm1
+        inter = content * g.expand_as(content) + (1 - g.expand_as(content)) * head_tm1
 
         # Apply the shift to the content based address
         # Note: the original paper does this use circular convolution
         # Therefore we're gonna hack one out by padding 1D valid convolutions
         inter_expanded = torch.cat([inter[:, -(self.shift_range - 1):], inter], dim = 1)
 
-        out = torch.autograd.Variable(torch.Tensor(*inter.size()))
-
-        if inter_expanded.is_cuda:
-          out = out.cuda()
-        for i in range(s.size()[0]):
-            out[i] = F.conv1d(inter_expanded[i:i + 1, None], s[i:i + 1, None]).squeeze()
+        inter_split = inter_expanded.unsqueeze(1).chunk(s.size()[0])
+        s_split = s.unsqueeze(1).chunk(s.size()[0])
+        out = [F.conv1d(i, si) for (i, si) in zip(inter_split, s_split)]
+        out = torch.cat(out, dim = 0).squeeze()
 
         # Now we sharpen with gamma
         out = torch.pow(out, gamma.expand_as(out))
@@ -156,7 +154,7 @@ class NTM(Module):
         read_head = self.get_address(memory, heads[0], *read_params)
 
         # (samples, 1, n) * (samples, n, m)
-        M_read = torch.bmm(read_head[:, None], memory).squeeze()
+        M_read = torch.bmm(read_head.unsqueeze(1), memory).squeeze()
 
         # Controller is fed the input concatenated with the last read
         in_all = torch.cat([inp, M_read], 1).contiguous()
@@ -172,15 +170,18 @@ class NTM(Module):
 
         # Get the write vectors (erase and then add)
         write_all = self.head_w(out[0])
-        e = F.sigmoid(write_all[:, :self.m_length])
-        a = write_all[:, self.m_length:]
+        #e = F.sigmoid(write_all[:, :self.m_length])
+        #a = write_all[:, self.m_length:]
+        e, a = write_all.chunk(2, dim = 1)
+        e = F.sigmoid(e)
+        a = F.tanh(a)
 
 
         # Write to memory
         # Erase first, then add
-        write_weight = write_head[:, :, None].expand_as(memory)
-        M_out = memory * (1 - write_weight * e[:, None, :].expand_as(memory))
-        M_out += write_weight * a[:, None, :].expand_as(memory)
+        write_weight = write_head.unsqueeze(2).expand_as(memory)
+        M_out = memory * (1 - write_weight * e.unsqueeze(1).expand_as(memory))
+        M_out += write_weight * a.unsqueeze(1).expand_as(memory)
 
 
         # We're done, return all the new results
