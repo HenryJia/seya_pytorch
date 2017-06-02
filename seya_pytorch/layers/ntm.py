@@ -46,6 +46,13 @@ class NTM(Module):
         # We bundle them together for better parallelism
         self.head_w = Linear(self.hidden_size, 2 * self.m_length)
 
+        # A "rolling" tensor for our cicular convolution hack (credits to EderSanta)
+        eye = np.eye(self.n_slots)
+        shifts = range(self.shift_range // 2, -self.shift_range // 2, -1)
+        # shifts, n_slots, n_slots
+        C = np.asarray([np.roll(eye, s, axis=1) for s in shifts])
+        self.C = Variable(torch.from_numpy(C).float()).cuda() # Just assume cuda
+
         self.reset_weights()
 
     def reset_weights(self):
@@ -129,13 +136,26 @@ class NTM(Module):
 
         # Apply the shift to the content based address
         # Note: the original paper does this use circular convolution
-        # Therefore we're gonna hack one out by padding 1D valid convolutions
-        inter_expanded = torch.cat([inter[:, -(self.shift_range - 1):], inter], dim = 1)
+        # Therefore we're gonna hack one out
 
-        inter_split = inter_expanded.unsqueeze(1).chunk(s.size()[0])
-        s_split = s.unsqueeze(1).chunk(s.size()[0])
-        out = [F.conv1d(i, si) for (i, si) in zip(inter_split, s_split)]
-        out = torch.cat(out, dim = 0).squeeze()
+        # Method 1: pad a 1D convolution and use for loop which is slow
+
+        #inter_expanded = torch.cat([inter[:, -(self.shift_range - 1):], inter], dim = 1)
+
+        #inter_split = inter_expanded.unsqueeze(1).chunk(s.size()[0])
+        #s_split = s.unsqueeze(1).chunk(s.size()[0])
+        #out = [F.conv1d(i, si) for (i, si) in zip(inter_split, s_split)]
+        #out = torch.cat(out, dim = 0).squeeze()
+
+        # Method 2, rephrase as matrix multiply
+        # Use our rolling tensor to roll inter by taking inner product along last axis
+        C = self.C.unsqueeze(0).expand(s.size()[0], *self.C.size())
+        # samples, n_shifts, n_slots, n_slots
+        inter_rolled = C * inter.unsqueeze(1).unsqueeze(1).expand_as(C)
+        # samples, n_shifts, n_slots
+        inter_rolled = inter_rolled.sum(3).squeeze()
+        # samples, n_slots
+        out = (inter_rolled * s.unsqueeze(2).expand_as(inter_rolled)).sum(1).squeeze()
 
         # Now we sharpen with gamma
         out = torch.pow(out, gamma.expand_as(out))
@@ -160,22 +180,16 @@ class NTM(Module):
         in_all = torch.cat([inp, M_read], 1).contiguous()
         out = self.controller(in_all, states)
 
-
         # Get the controller output again
         write_params = self.get_controller(out[0], self.head_wk, self.head_wc, self.head_ws)
-
         # Do addressing, content based and then shift. We lump it as a single function
         write_head = self.get_address(memory, heads[1], *write_params)
 
-
         # Get the write vectors (erase and then add)
         write_all = self.head_w(out[0])
-        #e = F.sigmoid(write_all[:, :self.m_length])
-        #a = write_all[:, self.m_length:]
         e, a = write_all.chunk(2, dim = 1)
         e = F.sigmoid(e)
         a = F.tanh(a)
-
 
         # Write to memory
         # Erase first, then add
@@ -183,6 +197,5 @@ class NTM(Module):
         M_out = memory * (1 - write_weight * e.unsqueeze(1).expand_as(memory))
         M_out += write_weight * a.unsqueeze(1).expand_as(memory)
 
-
         # We're done, return all the new results
-        return [out[0], out[1]], [read_head, write_head], M_out
+        return out, [read_head, write_head], M_out
