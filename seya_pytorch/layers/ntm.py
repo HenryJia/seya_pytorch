@@ -82,13 +82,14 @@ class NTM(Module):
         self.head_w.bias.data.zero_()
 
         # We'll use Xavier/Glorot uniform initialisation for them
+        bound_k = np.sqrt(6.0 / (self.hidden_size + 1))
         self.head_rk.bias.data.uniform_(bound_k, -bound_k)
         self.head_wk.bias.data.uniform_(bound_k, -bound_k)
 
         # Use ones initialisation for the forget gate
         # Note CuDNN/PyTorch uses 2 biases, even though it's equivalent to just using 1
         # Therefore we will only apply the ones initialisation to one of the forget biases
-        self.controller.bias_ih.data[self.hidden_size:2 * self.hidden_size] = 1
+        #self.controller.bias_ih.data[self.hidden_size:2 * self.hidden_size] = 1
 
         # Use orthogonal initialisation for the recurrent weight so that it has maximal eigenvalue 1
         # First we fill the weights with N(0, 1.0)
@@ -108,7 +109,7 @@ class NTM(Module):
         beta, g, gamma = c.chunk(3, dim = 1)
         beta = F.relu(beta) + 1e-4
         g = F.sigmoid(g)
-        gamma = F.relu(gamma) + 1 + 1e-4
+        gamma = F.relu(gamma) + 1.0001
 
         return (k, c, s, beta, g, gamma)
 
@@ -124,12 +125,12 @@ class NTM(Module):
         # Note: by default, pytorch keeps singleton dimensions after sum
         # Therefore nM and nk are actually (samples, n, 1) and (samples, 1) respectively
         # Also note: pytorch does not do broadcasting, so we have to manually expand dimensions
-        nM = (M**2).sum(2).squeeze()
-        nk = (k**2).sum(1).expand_as(dot)
+        nM = (M**2).sum(2).rsqrt().squeeze() # Note, reciprocal of sqrt directly is faster
+        nk = (k**2).sum(1).rsqrt().expand_as(dot)
 
         # Finally, get the cosine distance, and turn it into a soft address via softmax
         # We also sharpen via beta
-        content = F.softmax(beta.expand_as(dot) * dot / (nM * nk))
+        content = F.softmax(beta.expand_as(dot) * dot * nM * nk)
 
         # Apply the interpolation gate
         inter = content * g.expand_as(content) + (1 - g.expand_as(content)) * head_tm1
