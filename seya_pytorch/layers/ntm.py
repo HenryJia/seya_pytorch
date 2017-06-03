@@ -42,7 +42,7 @@ class NTM(Module):
         self.head_rs = Linear(self.hidden_size, self.shift_range)
         self.head_ws = Linear(self.hidden_size, self.shift_range)
 
-        # For the add and eras vectors
+        # For the add and erase vectors
         # We bundle them together for better parallelism
         self.head_w = Linear(self.hidden_size, 2 * self.m_length)
 
@@ -133,7 +133,8 @@ class NTM(Module):
         #content = F.softmax(beta.expand_as(dot) * dot * nM * nk)
 
         # Try using F.cosine_similarity instead -> (samples, n, m), (samples, n, m) -> dim 2
-        content = F.softmax(F.cosine_similarity(k.unsqueeze(1).expand_as(M).contiguous(), M, dim = 2))
+        cos = F.cosine_similarity(k.unsqueeze(1).expand_as(M).contiguous(), M, dim = 2)
+        content = F.softmax(beta.expand_as(cos) * cos)
 
         # Apply the interpolation gate
         g = g.expand_as(content).contiguous()
