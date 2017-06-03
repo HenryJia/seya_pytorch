@@ -119,21 +119,25 @@ class NTM(Module):
         # We can do this using the dot product rule via torch.addbmm
         # Therefore if we bmm (samples, 1, m) and (samples, m, n) this will give us (samples, 1, n)
         # We can then squeeze this to (samples, n)
-        dot = torch.bmm(k.unsqueeze(1), M.permute(0, 2, 1)).squeeze()
+        #dot = torch.bmm(k.unsqueeze(1), M.permute(0, 2, 1)).squeeze()
 
         # Get the norms of the slots and the embedding vectors
         # Note: by default, pytorch keeps singleton dimensions after sum
         # Therefore nM and nk are actually (samples, n, 1) and (samples, 1) respectively
         # Also note: pytorch does not do broadcasting, so we have to manually expand dimensions
-        nM = (M**2).sum(2).rsqrt().squeeze() # Note, reciprocal of sqrt directly is faster
-        nk = (k**2).sum(1).rsqrt().expand_as(dot)
+        #nM = (M**2).sum(2).rsqrt().squeeze() # Note, reciprocal of sqrt directly is faster
+        #nk = (k**2).sum(1).rsqrt().expand_as(dot)
 
         # Finally, get the cosine distance, and turn it into a soft address via softmax
         # We also sharpen via beta
-        content = F.softmax(beta.expand_as(dot) * dot * nM * nk)
+        #content = F.softmax(beta.expand_as(dot) * dot * nM * nk)
+
+        # Try using F.cosine_similarity instead -> (samples, n, m), (samples, n, m) -> dim 2
+        content = F.softmax(F.cosine_similarity(k.unsqueeze(1).expand_as(M).contiguous(), M, dim = 2))
 
         # Apply the interpolation gate
-        inter = content * g.expand_as(content) + (1 - g.expand_as(content)) * head_tm1
+        g = g.expand_as(content).contiguous()
+        inter = content * g + (1 - g) * head_tm1
 
         # Apply the shift to the content based address
         # Note: the original paper does this use circular convolution
@@ -150,17 +154,17 @@ class NTM(Module):
 
         # Method 2, rephrase as matrix multiply
         # Use our rolling tensor to roll inter by taking inner product along last axis
-        C = self.C.unsqueeze(0).expand(s.size()[0], *self.C.size())
+        C = self.C.unsqueeze(0).expand(s.size()[0], *self.C.size()).contiguous()
         # samples, n_shifts, n_slots, n_slots
-        inter_rolled = C * inter.unsqueeze(1).unsqueeze(1).expand_as(C)
+        inter_rolled = C * inter.unsqueeze(1).unsqueeze(1).expand_as(C).contiguous()
         # samples, n_shifts, n_slots
         inter_rolled = inter_rolled.sum(3).squeeze()
         # samples, n_slots
-        out = (inter_rolled * s.unsqueeze(2).expand_as(inter_rolled)).sum(1).squeeze()
+        out = (inter_rolled * s.unsqueeze(2).expand_as(inter_rolled).contiguous()).sum(1).squeeze()
 
         # Now we sharpen with gamma
-        out = torch.pow(out, gamma.expand_as(out))
-        out /= out.sum(1).expand_as(out)
+        out = torch.pow(out, gamma.expand_as(out).contiguous())
+        out /= out.sum(1).expand_as(out).contiguous()
 
         return out
 
@@ -175,10 +179,10 @@ class NTM(Module):
         read_head = self.get_address(memory, heads[0], *read_params)
 
         # (samples, 1, n) * (samples, n, m)
-        M_read = torch.bmm(read_head.unsqueeze(1), memory).squeeze()
+        M_read = torch.bmm(read_head.unsqueeze(1).contiguous(), memory).squeeze()
 
         # Controller is fed the input concatenated with the last read
-        in_all = torch.cat([inp, M_read], 1).contiguous()
+        in_all = torch.cat([inp, M_read], 1)
         out = self.controller(in_all, states)
 
         # Get the controller output again
@@ -194,9 +198,9 @@ class NTM(Module):
 
         # Write to memory
         # Erase first, then add
-        write_weight = write_head.unsqueeze(2).expand_as(memory)
-        M_out = memory * (1 - write_weight * e.unsqueeze(1).expand_as(memory))
-        M_out += write_weight * a.unsqueeze(1).expand_as(memory)
+        write_weight = write_head.unsqueeze(2).expand_as(memory).contiguous()
+        M_out = memory * (1 - write_weight * e.unsqueeze(1).expand_as(memory).contiguous())
+        M_out += write_weight * a.unsqueeze(1).expand_as(memory).contiguous()
 
         # We're done, return all the new results
         return out, [read_head, write_head], M_out
