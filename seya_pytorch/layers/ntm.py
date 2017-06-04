@@ -133,11 +133,11 @@ class NTM(Module):
         #content = F.softmax(beta.expand_as(dot) * dot * nM * nk)
 
         # Try using F.cosine_similarity instead -> (samples, n, m), (samples, n, m) -> dim 2
-        cos = F.cosine_similarity(k.unsqueeze(1).expand_as(M).contiguous(), M, dim = 2)
+        cos = F.cosine_similarity(k.unsqueeze(1).expand_as(M), M, dim = 2)
         content = F.softmax(beta.expand_as(cos) * cos)
 
         # Apply the interpolation gate
-        g = g.expand_as(content).contiguous()
+        g = g.expand_as(content)
         inter = content * g + (1 - g) * head_tm1
 
         # Apply the shift to the content based address
@@ -155,17 +155,17 @@ class NTM(Module):
 
         # Method 2, rephrase as matrix multiply
         # Use our rolling tensor to roll inter by taking inner product along last axis
-        C = self.C.unsqueeze(0).expand(s.size()[0], *self.C.size()).contiguous()
+        C = self.C.unsqueeze(0).expand(s.size()[0], *self.C.size())
         # samples, n_shifts, n_slots, n_slots
-        inter_rolled = C * inter.unsqueeze(1).unsqueeze(1).expand_as(C).contiguous()
+        inter_rolled = C * inter.unsqueeze(1).unsqueeze(1).expand_as(C)
         # samples, n_shifts, n_slots
         inter_rolled = inter_rolled.sum(3).squeeze()
         # samples, n_slots
-        out = (inter_rolled * s.unsqueeze(2).expand_as(inter_rolled).contiguous()).sum(1).squeeze()
+        out = (inter_rolled * s.unsqueeze(2).expand_as(inter_rolled)).sum(1).squeeze()
 
         # Now we sharpen with gamma
-        out = torch.pow(out, gamma.expand_as(out).contiguous())
-        out /= out.sum(1).expand_as(out).contiguous()
+        out = torch.pow(out, gamma.expand_as(out))
+        out /= out.sum(1).expand_as(out)
 
         return out
 
@@ -180,7 +180,7 @@ class NTM(Module):
         read_head = self.get_address(memory, heads[0], *read_params)
 
         # (samples, 1, n) * (samples, n, m)
-        M_read = torch.bmm(read_head.unsqueeze(1).contiguous(), memory).squeeze()
+        M_read = torch.bmm(read_head.unsqueeze(1), memory).squeeze()
 
         # Controller is fed the input concatenated with the last read
         in_all = torch.cat([inp, M_read], 1)
@@ -199,9 +199,9 @@ class NTM(Module):
 
         # Write to memory
         # Erase first, then add
-        write_weight = write_head.unsqueeze(2).expand_as(memory).contiguous()
-        M_out = memory * (1 - write_weight * e.unsqueeze(1).expand_as(memory).contiguous())
-        M_out += write_weight * a.unsqueeze(1).expand_as(memory).contiguous()
+        write_weight = write_head.unsqueeze(2).expand_as(memory)
+        M_out = memory * (1 - write_weight * e.unsqueeze(1).expand_as(memory))
+        M_out += write_weight * a.unsqueeze(1).expand_as(memory)
 
         # We're done, return all the new results
         return out, [read_head, write_head], M_out
